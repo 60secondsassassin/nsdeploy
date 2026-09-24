@@ -1,0 +1,458 @@
+#!/bin/sh
+
+baseimage=cibz
+imagename=cioc
+
+container_mac=62:10:C5:00:11:23
+hostname=csoc
+
+machinectl disable "$imagename"
+machinectl remove "$imagename"
+
+bash -c "rm -R /etc/systemd/system/systemd-nspawn@${imagename}.service.d/ 2>/dev/null || true"
+
+# Snapshot Btrfs du conteneur de base
+btrfs subvolume snapshot /var/lib/machines/"$baseimage"/ /var/lib/machines/"$imagename"/
+
+# Refresh zypper
+zypper --non-interactive --gpg-auto-import-keys ref
+
+# Installation des paquets nécessaires
+zypper --installroot /var/lib/machines/$imagename/ install --no-recommends --force-resolution -y \
+  apache2-event apache2-utils avif-tools exiftool ffmpeg ImageMagick krb5 libheif-aom libheif-dav1d libheif-ffmpeg libheif-rav1e \
+  openssl php7 php7-APCu php7-cli php7-ctype php7-curl php7-dom php7-exif php7-fileinfo php7-fpm php7-ftp php7-gd php7-gmp \
+  php7-iconv php7-imagick php7-intl php7-json php7-ldap php7-mbstring php7-mysql php7-opcache php7-openssl php7-phar php7-pcntl \
+  php7-posix php7-sodium php7-sysvsem php7-redis php7-ssh2 php7-xmlreader php7-xmlwriter php7-zip php7-zlib \
+  python3-certbot python3-certbot-apache redis sudo \
+  libdrm_amdgpu1 Mesa-dri Mesa-libva libva-utils
+
+# Déploiement ownCloud
+tar -xjf /storage/persistent/owncloud/owncloud-complete-20260218.tar.bz2 \
+  -C /var/lib/machines/$imagename/srv/www/htdocs/
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+install -d -o wwwrun -g wwwrun -m 0750 /srv/www/htdocs/owncloud/
+
+
+########################################
+# Services systemd ownCloud (cron + previews)
+########################################
+
+# # Preview generator service
+# systemd-nspawn --directory /var/lib/machines/$imagename/ \
+# bash -c 'cat << EOF | tee /etc/systemd/system/owncloudprev.service
+# [Unit]
+# Description=owncloud preview generator job
+# After=network.target redis@www.service php-fpm.service apache2.service
+#
+# [Service]
+# User=wwwrun
+# ExecStartPre=/usr/bin/php -f /srv/www/htdocs/owncloud/occ status
+# ExecStart=/usr/bin/php -f /srv/www/htdocs/owncloud/occ preview:pre-generate
+# KillMode=process
+# EOF'
+#
+# # Preview generator timer
+# systemd-nspawn --directory /var/lib/machines/$imagename/ \
+# bash -c 'cat << EOF | tee /etc/systemd/system/owncloudprev.timer
+# [Unit]
+# Description=Run owncloud preview generator every 60 minutes
+#
+# [Timer]
+# OnBootSec=60min
+# OnUnitActiveSec=60min
+# Unit=owncloudprev.service
+#
+# [Install]
+# WantedBy=timers.target
+# EOF'
+
+# Cron service
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c 'cat << EOF | tee /etc/systemd/system/owncloudcron.service
+[Unit]
+Description=owncloud cron.php job
+After=network.target redis@www.service php-fpm.service apache2.service
+
+[Service]
+User=wwwrun
+ExecStart=/usr/bin/php -f /srv/www/htdocs/owncloud/occ system:cron
+KillMode=process
+EOF'
+
+# Cron timer
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c 'cat << EOF | tee /etc/systemd/system/owncloudcron.timer
+[Unit]
+Description=Run owncloud cron.php every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Unit=owncloudcron.service
+
+[Install]
+WantedBy=timers.target
+EOF'
+
+########################################
+# Apache vhost + PHP-FPM
+########################################
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c 'cat << EOF | tee /etc/apache2/vhosts.d/owncloud.conf
+<VirtualHost *:80>
+    ServerName sduz.uk.to
+    DocumentRoot /srv/www/htdocs/owncloud
+    Redirect permanent / https://sduz.uk.to/
+</VirtualHost>
+
+<Proxy "fcgi://localhost/">
+    ProxySet timeout=3600
+</Proxy>
+
+<IfModule mod_ssl.c>
+<VirtualHost *:443>
+    ServerName sduz.uk.to
+    DocumentRoot /srv/www/htdocs/owncloud
+
+    <Directory /srv/www/htdocs/owncloud>
+        Options -Indexes -MultiViews +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    <FilesMatch "\.php$">
+        SetHandler "proxy:unix:/var/run/php-fpm/www.sock|fcgi://localhost/"
+    </FilesMatch>
+
+    Timeout 3600
+    ProxyTimeout 3600
+    RequestReadTimeout body=0,MinRate=1
+
+    LimitRequestBody 0
+
+    ErrorLog /var/log/apache2/owncloud_ssl_error.log
+    CustomLog /var/log/apache2/owncloud_ssl_access.log combined
+
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/sduz.uk.to/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/sduz.uk.to/privkey.pem
+
+    SSLProtocol -all +TLSv1.2 +TLSv1.3
+    SSLCipherSuite HIGH:!aNULL:!MD5
+    SSLHonorCipherOrder On
+
+    Protocols h2 http/1.1
+
+    <IfModule mod_headers.c>
+        Header always set Strict-Transport-Security "max-age=15552000; includeSubDomains"
+        Header always set Referrer-Policy "no-referrer"
+        Header always set X-Content-Type-Options "nosniff"
+        Header always set X-Frame-Options "SAMEORIGIN"
+        Header always set X-XSS-Protection "1; mode=block"
+        Header always set Permissions-Policy "interest-cohort=()"
+    </IfModule>
+</VirtualHost>
+</IfModule>
+EOF'
+
+# ServerName global
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c 'echo "ServerName sduz.uk.to" > /etc/apache2/conf.d/servername.conf'
+
+# SSLSessionCache
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c "mkdir -p /var/cache/apache2 && chown wwwrun:wwwrun /var/cache/apache2"
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c 'cat << EOF | tee /etc/apache2/conf.d/sslsessioncache.conf
+SSLSessionCache shmcb:/var/cache/apache2/ssl_scache(512000)
+SSLSessionCacheTimeout 300
+EOF'
+
+# Correction mod_cgi
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+grep -v  "cgi_module" /etc/apache2/loadmodule.conf | tee /etc/apache2/loadmodule.conf.temp && mv /etc/apache2/loadmodule.conf.temp /etc/apache2/loadmodule.conf
+
+# MPM event tuning
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c "sed -i -E \
+  -e 's/(StartServers[[:space:]]+)[0-9]+/\12/' \
+  -e 's/(ServerLimit[[:space:]]+)[0-9]+/\110/' \
+  -e 's/(ThreadsPerChild[[:space:]]+)[0-9]+/\125/' \
+  -e 's/(MaxRequestWorkers[[:space:]]+)[0-9]+/\1250/' \
+  -e 's/(MaxConnectionsPerChild[[:space:]]+)[0-9]+/\10/' \
+  /etc/apache2/server-tuning.conf"
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c 'cat << EOF | tee /etc/apache2/listen.conf
+Listen 80
+Listen 443
+EOF'
+
+# Modules Apache
+for mod in ssl headers rewrite http2 proxy proxy_fcgi proxy_http socache_shmcb mpm_event; do
+  systemd-nspawn --directory /var/lib/machines/$imagename/ \
+    bash -c "a2enmod $mod"
+done
+
+for mod in php7 mpm_prefork; do
+  systemd-nspawn --directory /var/lib/machines/$imagename/ \
+    bash -c "a2dismod $mod"
+done
+
+########################################
+# PHP configuration (CLI + FPM)
+########################################
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c "sed -i 's/memory_limit = 128M/memory_limit = 1024M/g' /etc/php7/cli/php.ini"
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c "sed -i 's/;opcache.interned_strings_buffer=8/opcache.interned_strings_buffer=64/g' /etc/php7/cli/php.ini"
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c 'cat << EOF | tee /etc/php7/fpm/php-fpm.conf
+[global]
+include=/etc/php7/fpm/php-fpm.d/*.conf
+EOF'
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c 'cat << EOF | tee /etc/php7/fpm/php-fpm.d/www.conf
+[www]
+user = wwwrun
+group = wwwrun
+
+listen = /var/run/php-fpm/www.sock
+listen.owner = wwwrun
+listen.group = wwwrun
+listen.mode = 0660
+
+; --- Gestion des processus ---
+pm = dynamic
+pm.max_children = 12
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+pm.max_requests = 500
+
+; --- Santé / Observabilité ---
+pm.status_path = /status
+ping.path = /ping
+ping.response = pong
+catch_workers_output = yes
+
+; --- Timeouts & slowlog (POOL directives, PAS en php_admin_value) ---
+request_terminate_timeout = 3600
+request_slowlog_timeout = 10
+slowlog = /var/log/php-fpm_www-slow.log
+
+; --- PHP admin values (spécifiques au SAPI FPM) ---
+; OPcache (prod) — penser à reloader FPM au déploiement
+php_admin_value[opcache.enable] = 1
+php_admin_value[opcache.memory_consumption] = 256
+php_admin_value[opcache.interned_strings_buffer] = 64
+php_admin_value[opcache.max_accelerated_files] = 60000
+php_admin_value[opcache.validate_timestamps] = 0
+php_admin_value[opcache.save_comments] = 1
+php_admin_value[opcache.file_update_protection] = 0
+php_admin_value[opcache.max_wasted_percentage] = 10
+
+; Caches chemins
+php_admin_value[realpath_cache_size] = 4096K
+php_admin_value[realpath_cache_ttl] = 600
+
+; Limites & temps d’exécution (adapter si besoin)
+php_admin_value[max_execution_time] = 3600
+php_admin_value[max_input_time] = 3600
+php_admin_value[memory_limit] = 1024M
+php_admin_value[post_max_size] = 10G
+php_admin_value[upload_max_filesize] = 10G
+
+; Sessions (durée et sécurité)
+php_admin_value[session.gc_maxlifetime] = 86400
+php_admin_value[session.cookie_secure] = 1
+php_admin_value[session.cookie_httponly] = 1
+php_admin_value[session.use_strict_mode] = 1
+php_admin_value[session.sid_length] = 128
+php_admin_value[session.sid_bits_per_character] = 6
+
+; Stockage des sessions dans Redis (instance SESSIONS)
+; - Socket Unix : /var/run/redis/sessions.sock
+; - Prefix pour lisibilité : PHPSESSID:
+; - Verrouillage activé pour éviter la corruption en concurrence
+php_admin_value[session.save_handler] = redis
+php_admin_value[session.save_path] = "unix:///var/run/redis/sessions.sock?persistent=1&database=1&prefix=PHPSESSID:&timeout=2.0&read_timeout=2.0&retry_interval=100"
+php_admin_value[redis.session.locking_enabled] = 1
+php_admin_value[redis.session.lock_retries] = -1
+php_admin_value[redis.session.lock_wait_time] = 10000
+
+; Divers
+php_admin_value[ignore_user_abort] = On
+php_admin_value[max_input_vars] = 3000
+php_admin_value[output_buffering] = 4096
+php_admin_value[default_socket_timeout] = 3600
+php_admin_value[date.timezone] = Europe/Paris
+php_admin_value[expose_php] = 0
+php_admin_value[error_reporting] = E_ALL & ~E_DEPRECATED & ~E_STRICT
+php_admin_value[log_errors_max_len] = 8192
+
+; Fonctions désactivées (à ajuster selon besoins applicatifs)
+php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen,parse_ini_file,show_source
+; (si ton app a besoin de curl_multi_exec, ne pas le désactiver)
+EOF'
+
+# Répertoire de sessions PHP
+# systemd-nspawn --directory /var/lib/machines/$imagename/ \
+# bash -c "mkdir -p /var/tmp/php-sessions && chown wwwrun:wwwrun /var/tmp/php-sessions"
+
+########################################
+# Redis 100% RAM optimisé
+########################################
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+  install -d -o redis -g redis -m 0750 /var/lib/redis/www/
+
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c 'cat << EOF | tee /etc/redis/sessions.conf
+# --- Ecoute via socket Unix (locale) ---
+port 0
+unixsocket /var/run/redis/sessions.sock
+unixsocketperm 660
+protected-mode yes
+
+daemonize no
+supervised systemd
+pidfile /var/run/redis/sessions.pid
+
+loglevel notice
+logfile /var/log/redis/sessions.log
+
+databases 1
+
+# --- Pas de persistance pour un cache ---
+save ""
+appendonly no
+appendfsync no
+stop-writes-on-bgsave-error no
+rdbcompression no
+rdbchecksum no
+dbfilename ""
+dir /var/lib/redis
+
+# --- Mémoire & Eviction (cache agressif) ---
+maxmemory 2gb
+maxmemory-policy allkeys-lru
+
+# --- Clients lents ---
+client-output-buffer-limit normal 128mb 32mb 60
+client-output-buffer-limit pubsub 32mb 8mb 60
+
+# --- Perf & maintenance ---
+activerehashing yes
+hz 10
+dynamic-hz yes
+jemalloc-bg-thread yes
+
+# --- Observabilité ---
+slowlog-log-slower-than 10000
+slowlog-max-len 256
+latency-monitor-threshold 100
+
+set-proc-title yes
+proc-title-template "{title} {listen-addr} {server-mode}"
+notify-keyspace-events ""
+EOF'
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c 'cat << EOF | tee /etc/redis/cache.conf
+# --- Ecoute via socket Unix (locale) ---
+port 0
+unixsocket /var/run/redis/cache.sock
+unixsocketperm 660
+protected-mode yes
+
+daemonize no
+supervised systemd
+pidfile /var/run/redis/cache.pid
+
+loglevel notice
+logfile /var/log/redis/cache.log
+
+databases 1
+
+# --- Pas de persistance pour un cache ---
+save ""
+appendonly no
+appendfsync no
+stop-writes-on-bgsave-error no
+rdbcompression no
+rdbchecksum no
+dbfilename ""
+dir /var/lib/redis
+
+# --- Mémoire & Eviction (cache agressif) ---
+maxmemory 2gb
+maxmemory-policy allkeys-lru
+
+# --- Clients lents ---
+client-output-buffer-limit normal 128mb 32mb 60
+client-output-buffer-limit pubsub 32mb 8mb 60
+
+# --- Perf & maintenance ---
+activerehashing yes
+hz 10
+dynamic-hz yes
+jemalloc-bg-thread yes
+
+# --- Observabilité ---
+slowlog-log-slower-than 10000
+slowlog-max-len 256
+latency-monitor-threshold 100
+
+set-proc-title yes
+proc-title-template "{title} {listen-addr} {server-mode}"
+notify-keyspace-events ""
+EOF'
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+  usermod -aG redis wwwrun
+
+########################################
+# Réseau, hostname, services
+########################################
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c "sed -i 's/MACAddress=.*/MACAddress=${container_mac}/g' /etc/systemd/network/00-host0.network"
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+bash -c "cat << EOF | tee /etc/hostname
+$hostname
+EOF"
+
+systemd-nspawn --directory /var/lib/machines/$imagename/ \
+  systemctl enable apache2.service owncloudcron.timer php-fpm.service redis@sessions.service redis@cache.service
+
+########################################
+# Bind mounts et override nspawn
+########################################
+
+bash -c "mkdir -p /etc/systemd/system/systemd-nspawn@${imagename}.service.d/"
+bash -c "cat << EOF | tee /etc/systemd/system/systemd-nspawn@${imagename}.service.d/override.conf
+[Service]
+DeviceAllow=char-drm rwm
+EOF"
+
+cp --reflink /etc/systemd/nspawn/$baseimage.nspawn /etc/systemd/nspawn/$imagename.nspawn
+
+sed -i '/\[Files\]/a Bind=/storage/data/owncloudData:/srv/www/htdocs/owncloud/data' /etc/systemd/nspawn/$imagename.nspawn
+sed -i '/\[Files\]/a Bind=/storage/persistent/owncloud/apps-external:/srv/www/htdocs/owncloud/apps-external' /etc/systemd/nspawn/$imagename.nspawn
+sed -i '/\[Files\]/a Bind=/storage/persistent/owncloud/config.php:/srv/www/htdocs/owncloud/config/config.php' /etc/systemd/nspawn/$imagename.nspawn
+sed -i '/\[Files\]/a Bind=/storage/persistent/owncloud/mimetypemapping.json:/srv/www/htdocs/owncloud/config/mimetypemapping.json' /etc/systemd/nspawn/$imagename.nspawn
+sed -i '/\[Files\]/a Bind=/storage/persistent/owncloud/cert/letsencrypt:/etc/letsencrypt' /etc/systemd/nspawn/$imagename.nspawn
+sed -i '/\[Files\]/a Bind=/dev/shm' /etc/systemd/nspawn/$imagename.nspawn
+sed -i '/\[Files\]/a Bind=/dev/dri' /etc/systemd/nspawn/$imagename.nspawn
+
+machinectl enable "$imagename"
