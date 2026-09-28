@@ -8,17 +8,25 @@ command_remove_disk_mount() {
 
 command_add_partition_mount() {
     # ${1}=partition_path ${2}=partition_num|mount_path
-    while read -r part_num mount_path; do
-        partuuid=$(adapter_get_partition_identifier "${1}${part_num}")
-        adapter_add_partition_mount "${partuuid}" "${mount_path}"
-    done <<EOF
+    case "${2}" in
+        [0-9]"|/"*)
+            while IFS='|' read -r part_num mount_path; do
+                partuuid=$(adapter_get_partition_identifier "${1}${part_num}")
+                adapter_add_partition_mount "${partuuid}" "${mount_path}"
+            done <<EOF
 ${2}
 EOF
+            ;;
+        *)
+            partuuid=$(adapter_get_partition_identifier "${1}")
+            adapter_add_partition_mount "${partuuid}" "${2}"
+        ;;
+    esac
 }
 
 command_add_directory_bind_mount() {
     # ${1}=work_directory ${2}=source_dir|mount_path
-    while read -r source_dir mount_path; do
+    while IFS='|' read -r source_dir mount_path; do
         adapter_add_directory_bind_mount "${source_dir}" "${1}/${mount_path}"
     done <<EOF
 ${2}
@@ -57,7 +65,7 @@ command_set_partition_prefix() {
 # ------------------------------------------------------------------------------
 command_new_partition() {
     # ${1}=disk_path ${2}=part_num|part_type|part_label|part_start|part_end
-    while read -r part_num part_type part_label part_start part_end; do
+    while IFS='|' read -r part_num part_type part_label part_start part_end; do
         adapter_new_partition "${1}" "${part_start}" "${part_end}"
     done <<EOF
 ${2}
@@ -74,7 +82,7 @@ command_set_partition_flag() {
 # ------------------------------------------------------------------------------
 command_initialize_partition() {
     # ${1}=partition_path ${2}=part_num|part_type|part_label|part_start|part_end
-    while read -r part_num part_type part_label part_start part_end; do
+    while IFS='|' read -r part_num part_type part_label part_start part_end; do
         case "${part_type}" in
             vfat)
                 adapter_initialize_partition_vfat "${1}${part_num}" "${part_label}"

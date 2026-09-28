@@ -2,8 +2,10 @@
 # [COMPORTEMENT] COMMAND — Snapshot & Subvolume
 # ------------------------------------------------------------------------------
 command_new_subvolume() {
-    # ${1}=subvol_dir
-    adapter_new_subvolume "${1}"
+    # ${1}=work_directory ${2}=subvolume_list
+    for subvolume in ${2}; do
+        adapter_new_subvolume "${1}/${subvolume}"
+    done
 }
 
 command_set_subvolume_compression() {
