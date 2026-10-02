@@ -2,7 +2,7 @@
 # [COMPORTEMENT] COMMAND — Package Management
 # ------------------------------------------------------------------------------
 command_update_zypper_repository() {
-    update_repository
+    adapter_update_zypper_repository
 }
 
 command_install_rpm_package() {

@@ -20,7 +20,7 @@ EOF
         *)
             partuuid=$(adapter_get_partition_identifier "${1}")
             adapter_add_partition_mount "${partuuid}" "${2}"
-        ;;
+            ;;
     esac
 }
 
