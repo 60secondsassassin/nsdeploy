@@ -2,12 +2,8 @@
 # [COMPORTEMENT] TEMPLATE METHOD
 # ------------------------------------------------------------------------------
 envir() {
-    # $1=image_name
+    # $1=image_name $2=disk_path
     SCRIPT_DIR="$(dirname "${0}")"
-
-    if [ -f "${SCRIPT_DIR}/machines/${1}/${1}.env" ]; then
-        . "${SCRIPT_DIR}/machines/${1}/${1}.env"
-    fi
 
     for file in "${SCRIPT_DIR}/cmd"/*.sh; do
         [ -f "${file}" ] && . "${file}"
@@ -20,6 +16,10 @@ envir() {
     for file in "${SCRIPT_DIR}/env"/*.env; do
         [ -f "${file}" ] && . "${file}"
     done
+
+    if [ -f "${SCRIPT_DIR}/machines/${1}/${1}.env" ]; then
+        . "${SCRIPT_DIR}/machines/${1}/${1}.env"
+    fi
 }
 
 template_physical() {
@@ -29,10 +29,10 @@ template_physical() {
         return 2
     fi
 
-    envir "${1}"
+    envir "${1}" "${2}"
 
     partition_prefix="$(command_set_partition_prefix "${2}")"
-    work_directory="$(adapter_new_temporary_directory "${TEMPORARY_DIRECTORY_PREFIX}")"
+    work_directory="$(adapter_new_temporary_directory "${APP_NAME}")"
 
     command_remove_disk_mount "${2}${partition_prefix}" || return 1
 
@@ -50,7 +50,7 @@ template_physical() {
 
     command_set_subvolume_compression "${work_directory}" "${SUBVOLUME_COMPRESSION_ALGORITHM}" || return 1
 
-    command_new_subvolume "${work_directory}" "${SUBVOLUME}" || return 1
+    command_new_subvolume "${work_directory}" "${NEW_SUBVOLUME}" || return 1
 
     command_update_zypper_repository || return 1
 
@@ -60,7 +60,7 @@ template_physical() {
 
     command_add_partition_mount "${2}${partition_prefix}" "${DISK_PARTITION_MOUNT}" || return 1
 
-    if [ "${GRAPHICAL_TARGET}" = "true" ]; then
+    if [ "${SESSION_TYPE}" = "graphical" ]; then
         command_install_rpm_package "${work_directory}" "${GRAPHICAL_RPM_PACKAGE}" || return 1
         command_install_rpm_package_language "${work_directory}" || return 1
     fi

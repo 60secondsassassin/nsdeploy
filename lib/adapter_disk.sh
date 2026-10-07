@@ -54,7 +54,7 @@ adapter_get_disk_type() {
 
 adapter_get_disk_size() {
     # $1=disk_path
-    echo $(( $(blockdev --getsz "${1}") / 2 ))
+    printf '%s' $(( $(blockdev --getsz "${1}") / 2 ))
 }
 
 adapter_remove_disk_content() {
@@ -72,12 +72,13 @@ adapter_new_partition_table() {
 # ------------------------------------------------------------------------------
 adapter_new_partition() {
     # $1=disk_path $2=part_start $3=part_end
-    parted "${1}" --script unit MiB mkpart primary "${2}" "${3}"
+    # values are kept in KiB to match adapter_get_disk_size() and adapter_get_memory_size()
+    parted "${1}" --script unit KiB mkpart primary "${2}" "${3}"
 }
 
 adapter_set_partition_flag() {
     # $1=disk_path $2=part_num
-    parted "${1}" unit MiB set "${2}" boot on print
+    parted "${1}" unit KiB set "${2}" boot on print
 }
 
 adapter_get_partition_identifier() {
